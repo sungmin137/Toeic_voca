@@ -163,6 +163,10 @@ button:focus-visible,label:focus-within{outline:2px solid var(--accent);outline-
 .btn.small{padding:6px 12px;font-size:.85rem}
 .empty{text-align:center;color:var(--muted);padding:24px 0;margin:0}
 h2{font-size:1.05rem;margin:0}
+.status{margin:0;font-weight:500}
+.pausebox{display:none;flex-direction:column;gap:10px;align-items:center;text-align:center;padding:28px 0}
+.card.paused .pausebox{display:flex}
+.card.paused .prompt,.card.paused .field,.card.paused .verdict{display:none!important}
 /* example-sentence quiz */
 .prompt .word.sent{font-family:var(--f-body);font-weight:500;font-size:clamp(1.1rem,3.6vw,1.4rem);line-height:1.6;text-align:left;text-wrap:pretty;align-self:stretch}
 .blank{display:inline-block;min-width:5.5em;border-bottom:2px solid var(--accent);margin:0 .2em}
@@ -185,6 +189,14 @@ h2{font-size:1.05rem;margin:0}
   </header>
 
   <section class="view" id="vHome">
+    <div class="card" id="resumeCard" hidden>
+      <p class="label">풀던 퀴즈</p>
+      <p class="status" id="resumeInfo"></p>
+      <div class="row">
+        <button type="button" class="btn primary" id="resumeGo">이어서 풀기</button>
+        <button type="button" class="btn" id="resumeDrop">버리고 새로 시작</button>
+      </div>
+    </div>
     <div class="card book" id="bookCard">
       <div>
         <p class="label">단어장</p>
@@ -259,13 +271,21 @@ h2{font-size:1.05rem;margin:0}
   </section>
 
   <section class="view" id="vQuiz" hidden>
-    <div class="card">
+    <div class="card" id="quizCard">
       <div class="qhead">
         <span id="qProgress"></span>
         <span id="qScore"></span>
-        <button type="button" class="linkbtn" id="quitBtn">그만하기</button>
+        <span class="row">
+          <button type="button" class="linkbtn" id="pauseBtn">잠시 멈춤</button>
+          <button type="button" class="linkbtn" id="quitBtn">그만하기</button>
+        </span>
       </div>
       <div class="timer" id="timer"><div class="track"><div class="fill" id="timerFill"></div></div><span class="sec" id="timerSec"></span></div>
+      <div class="pausebox" id="pauseBox">
+        <p class="status">잠시 멈췄습니다</p>
+        <p class="muted">시간은 멈춰 있고, 문제는 가려 두었습니다.</p>
+        <button type="button" class="btn primary big" id="resumeBtn">계속하기</button>
+      </div>
       <div class="prompt"><p class="label" id="qKind"></p><div class="word" id="qWord"></div></div>
       <div class="field" id="posField"><p class="label">품사</p><div class="opts pos" id="posOpts"></div></div>
       <div class="field"><p class="label" id="mainLabel"></p><div class="opts main" id="mainOpts"></div></div>
@@ -484,6 +504,7 @@ function show(v){
   view = v;
   for (const [id, name] of [['vHome','home'],['vQuiz','quiz'],['vResult','result'],['vNote','note'],['vList','list']]) $(id).hidden = name !== v;
   $('tabList').setAttribute('aria-selected', v === 'list');
+  if (v === 'quiz') { $('quizCard').classList.remove('paused'); $('pauseBtn').hidden = false; }
   if (v === 'list') renderList();
   $('tabs').hidden = v === 'quiz';
   $('tabHome').setAttribute('aria-selected', v === 'home' || v === 'result');
@@ -569,6 +590,9 @@ function renderHome(){
   renderReview();
   renderExCard();
   renderSheet();
+  const sq = savedQuiz();
+  $('resumeCard').hidden = !sq;
+  if (sq) $('resumeInfo').textContent = `${sq.label} · ${sq.items.length}문제 중 ${Math.min(sq.i || 0, sq.items.length)}문제까지 풀었습니다 · 정답 ${sq.right || 0}개`;
 }
 $('startBtn').addEventListener('click', () => {
   const pool = scopePool(), opts = countOptions(pool.length);
@@ -625,6 +649,7 @@ function optButton(group, i, content, keyHint){
 function nextQuestion(){
   clearTimeout(advanceT);
   if (quiz.i >= quiz.items.length) return finish();
+  saveQuiz(quiz.i);
   if (quiz.mode === 'cloze') return nextCloze();
   const q = quiz.q = buildQuestion(quiz.items[quiz.i]);
   quiz.locked = false; quiz.sel = {};
@@ -640,9 +665,10 @@ function nextQuestion(){
   $('verdict').replaceChildren();
   startTimer();
 }
-function startTimer(){
+function startTimer(leftMs){
   cancelAnimationFrame(raf);
-  const total = quiz.sec * 1000, end = performance.now() + total;
+  const total = quiz.sec * 1000, left0 = leftMs != null ? leftMs : total, end = performance.now() + left0;
+  quiz.tEnd = end;
   const fill = $('timerFill'), sec = $('timerSec'), box = $('timer');
   const tick = () => {
     const left = end - performance.now();
@@ -653,10 +679,52 @@ function startTimer(){
     raf = requestAnimationFrame(tick);
   };
   box.classList.remove('low'); tick();
-  clearTimeout(timeT); timeT = setTimeout(() => grade(true), total + 40);
+  clearTimeout(timeT); timeT = setTimeout(() => grade(true), left0 + 40);
 }
+/* pause: stops the clock and hides the question until the viewer continues */
+function pauseQuiz(){
+  if (!quiz || quiz.paused || view !== 'quiz') return;
+  quiz.paused = true;
+  if (quiz.locked) clearTimeout(advanceT);
+  else { quiz.left = Math.max(300, quiz.tEnd - performance.now()); cancelAnimationFrame(raf); clearTimeout(timeT); }
+  $('quizCard').classList.add('paused'); $('pauseBtn').hidden = true;
+}
+function resumeQuiz(){
+  if (!quiz || !quiz.paused) return;
+  quiz.paused = false;
+  $('quizCard').classList.remove('paused'); $('pauseBtn').hidden = false;
+  if (!quiz.locked) startTimer(quiz.left);
+  else if (!document.querySelector('#verdict .btn')) advance();
+}
+$('pauseBtn').addEventListener('click', pauseQuiz);
+$('resumeBtn').addEventListener('click', resumeQuiz);
+document.addEventListener('visibilitychange', () => { if (document.hidden) pauseQuiz(); });
+/* an unfinished quiz is kept in this browser so it can be continued later */
+function saveQuiz(i){
+  if (!quiz) return;
+  const m = quiz.meta || {};
+  LS.set('tv.quiz', {mode: quiz.mode, label: quiz.label, sec: quiz.sec, n: quiz.n, items: quiz.items,
+    cands: quiz.cands.length <= 400 ? quiz.cands : null,
+    meta: {chapter: m.chapter || 0, review: m.review || 0, kind: m.kind || ''},
+    i, right: quiz.right, missed: quiz.missed, at: Date.now()});
+}
+function clearSavedQuiz(){ LS.set('tv.quiz', null); }
+function savedQuiz(){ const s = LS.get('tv.quiz', null); return s && Array.isArray(s.items) && s.items.length ? s : null; }
+function resumeSaved(){
+  const s = savedQuiz();
+  if (!s) return renderHome();
+  const meta = s.meta || {}, cands = s.cands || s.items;
+  if (meta.kind === 'ex') meta.restart = startExQuiz;
+  if (meta.kind === 'exrev') meta.restart = startExReview;
+  let pool = s.mode === 'cloze' ? exList() : meta.review ? allWords() : cands;
+  if (pool.length < 4) pool = cands;
+  quiz = {mode: s.mode, cands, pool, n: s.n, label: s.label, meta, sec: s.sec, items: s.items, i: s.i || 0, right: s.right || 0, missed: s.missed || [], locked: false, sel: {}};
+  show('quiz'); nextQuestion();
+}
+$('resumeGo').addEventListener('click', resumeSaved);
+$('resumeDrop').addEventListener('click', () => { clearSavedQuiz(); renderHome(); });
 function choose(group, i){
-  if (!quiz || quiz.locked) return;
+  if (!quiz || quiz.locked || quiz.paused) return;
   const list = group === 'pos' ? quiz.q.pos : quiz.q.main;
   if (!list || !list[i]) return;
   quiz.sel[group] = i;
@@ -693,8 +761,9 @@ function grade(timeout){
       h('button', {type:'button', class:'btn', onclick: advance}, '다음'));
     advanceT = setTimeout(advance, 2500);
   }
+  saveQuiz(quiz.i + 1);
 }
-function advance(){ clearTimeout(advanceT); if (!quiz || view !== 'quiz') return; quiz.i++; nextQuestion(); }
+function advance(){ clearTimeout(advanceT); if (!quiz || view !== 'quiz' || quiz.paused) return; quiz.i++; nextQuestion(); }
 function recordWrong(e, kinds){
   const k = keyOf(e), r = wrong.get(k) || {w: e.w, p: e.p, m: e.m, s: e.s || '', c: 0, t: 0, k: {}};
   r.c++; r.t = Date.now(); if (e.s) r.s = e.s;
@@ -703,11 +772,13 @@ function recordWrong(e, kinds){
 }
 function stopQuiz(){ cancelAnimationFrame(raf); clearTimeout(advanceT); clearTimeout(timeT); if (wrongDirty) push('wrong'); if (progDirty) { progDirty = false; push('prog'); } }
 $('quitBtn').addEventListener('click', () => {
-  stopQuiz(); quiz.quit = true; quiz.items.length = quiz.i + (quiz.locked ? 1 : 0);
+  stopQuiz(); clearSavedQuiz(); quiz.quit = true; quiz.items.length = quiz.i + (quiz.locked ? 1 : 0);
   if (quiz.items.length) finish(); else show('home');
 });
 document.addEventListener('keydown', e => {
   if (view !== 'quiz' || !quiz || e.ctrlKey || e.metaKey || e.altKey) return;
+  if (e.code === 'Escape') { e.preventDefault(); return quiz.paused ? resumeQuiz() : pauseQuiz(); }
+  if (quiz.paused) return;
   if (quiz.locked) { if (e.code === 'Enter' || e.code === 'Space') { e.preventDefault(); advance(); } return; }
   let m = /^(?:Digit|Numpad)([1-4])$/.exec(e.code);
   if (m) { e.preventDefault(); return choose('main', +m[1] - 1); }
@@ -717,7 +788,7 @@ document.addEventListener('keydown', e => {
 
 const KIND = {p: '품사', m: '뜻', w: '단어', t: '시간 초과', x: '오답'};
 function finish(){
-  stopQuiz();
+  stopQuiz(); clearSavedQuiz();
   const kind = quiz.meta.chapter ? 'done' : quiz.meta.review ? 'review' : '', chNo = quiz.meta.chapter || quiz.meta.review;
   if (!quiz.quit && kind && !(prog[kind][chNo] || []).includes(today())) { (prog[kind][chNo] = prog[kind][chNo] || []).push(today()); saveProg(); }
   const done = quiz.items.length;
@@ -826,11 +897,11 @@ function startExQuiz(){
   const list = exList(), st = exState();
   let done = new Set(st.done), cands = list.filter(x => !done.has(x.h));
   if (!cands.length) { st.done = []; saveProg(); cands = list; }
-  startCloze(shuffle(cands).slice(0, prefs.exCount || 20), '예문 빈칸 퀴즈', {restart: startExQuiz});
+  startCloze(shuffle(cands).slice(0, prefs.exCount || 20), '예문 빈칸 퀴즈', {restart: startExQuiz, kind: 'ex'});
 }
 function startExReview(){
   const cands = exState().wrong.map(toEx).filter(Boolean);
-  startCloze(shuffle(cands).slice(0, exRevCount(cands.length)), '틀린 예문 복습', {restart: startExReview});
+  startCloze(shuffle(cands).slice(0, exRevCount(cands.length)), '틀린 예문 복습', {restart: startExReview, kind: 'exrev'});
 }
 $('exStartBtn').addEventListener('click', startExQuiz);
 $('exRevBtn').addEventListener('click', startExReview);
@@ -874,6 +945,7 @@ function gradeCloze(timeout){
     quiz.missed.push({w: ex.a.toLowerCase(), p: ex.p, m: ex.e, kinds: [timeout ? 't' : 'x']});
   }
   prog.updated = Date.now(); LS.set('tv.prog', prog); progDirty = true;
+  saveQuiz(quiz.i + 1);
   $('verdict').replaceChildren(
     h('p', {class: ok ? 'ok' : 'bad'}, ok ? '정답' : timeout ? '시간 초과' : '오답',
       h('span', {class: 'ans'}, ex.e.slice(0, ex.s), h('b', null, ex.a), ex.e.slice(ex.s + ex.a.length)),
