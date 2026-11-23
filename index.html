@@ -141,6 +141,8 @@ button:focus-visible,label:focus-within{outline:2px solid var(--accent);outline-
 .wrow.plain{grid-template-columns:minmax(0,1fr) minmax(0,1.2fr) auto}
 @media (max-width:520px){.wrow{grid-template-columns:minmax(0,1fr) auto auto}.wrow .m{grid-column:1/-1;grid-row:2}.wrow.plain{grid-template-columns:minmax(0,1fr) auto}}
 .search{font:inherit;padding:9px 12px;border:1px solid var(--line);border-radius:10px;background:var(--surface);color:var(--ink);width:100%}
+.book .sheet{flex:1 1 100%;display:flex;flex-direction:column;gap:8px}
+.sheet .row .search{flex:1 1 220px;width:auto;min-width:0}
 .search:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .legend{display:flex;flex-wrap:wrap;gap:6px 16px;font-size:.82rem;color:var(--muted)}
 .legend i{display:inline-block;width:12px;height:12px;border-radius:3px;margin-right:6px;vertical-align:-1px;border:1px solid var(--line)}
@@ -191,6 +193,14 @@ h2{font-size:1.05rem;margin:0}
         <p class="msg" id="bookMsg" hidden></p>
       </div>
       <label class="btn file"><input type="file" id="fileInput" accept=".xlsx,.xls,.csv">엑셀 올리기</label>
+      <div class="sheet" id="sheetBox" hidden>
+        <p class="label">구글 시트 연결</p>
+        <div class="row">
+          <input type="url" id="sheetUrl" class="search" placeholder="구글 시트 공유 링크 붙여 넣기" aria-label="구글 시트 공유 링크">
+          <button type="button" class="btn small primary" id="sheetBtn">연결</button>
+        </div>
+        <p class="muted" id="sheetInfo"></p>
+      </div>
     </div>
 
     <div class="card review" id="reviewCard" hidden>
@@ -558,6 +568,7 @@ function renderHome(){
   $('noteBadge').textContent = wrong.size ? wrong.size : '';
   renderReview();
   renderExCard();
+  renderSheet();
 }
 $('startBtn').addEventListener('click', () => {
   const pool = scopePool(), opts = countOptions(pool.length);
@@ -895,6 +906,56 @@ function renderExNote(){
   }));
 }
 
+/* ---------- Google Sheet link: read the wordbook from a link-shared sheet ---------- */
+// Not offered inside the Claude viewer, where pages cannot reach other sites.
+const SHEET_OK = !window.claude;
+let sheetCfg = LS.get('tv.sheet', null) || {url: '', id: '', at: 0, msg: ''}, sheetBusy = false;
+const sheetId = u => { const m = /[/]d[/]([A-Za-z0-9_-]{20,})/.exec(u || ''); return m ? m[1] : ''; };
+const bookSig = b => JSON.stringify([b.sheets.map(s => [s.name, s.words.map(x => [x.w, x.p, x.m])]), (b.examples || []).map(x => [x.w, x.e, x.k])]);
+function renderSheet(){
+  $('sheetBox').hidden = !SHEET_OK;
+  if (!SHEET_OK) return;
+  if (document.activeElement !== $('sheetUrl')) $('sheetUrl').value = sheetCfg.url;
+  $('sheetBtn').disabled = sheetBusy;
+  $('sheetBtn').textContent = sheetBusy ? '읽는 중' : sheetCfg.id ? '업데이트' : '연결';
+  $('sheetInfo').textContent = sheetCfg.msg || '링크를 붙여 넣으면 그 시트에서 단어장을 읽어 옵니다. 시트 공유가 "링크가 있는 모든 사용자"로 되어 있어야 합니다. 연결한 뒤에는 열 때마다 자동으로 확인합니다.';
+}
+async function updateFromSheet(manual){
+  if (!SHEET_OK || sheetBusy) return;
+  const url = manual ? norm($('sheetUrl').value) : sheetCfg.url, id = sheetId(url);
+  if (manual && !url) { sheetCfg = {url: '', id: '', at: 0, msg: '시트 연결을 해제했습니다. 지금 단어장은 그대로 남아 있습니다.'}; LS.set('tv.sheet', sheetCfg); return renderSheet(); }
+  if (!id) { if (manual) { sheetCfg.msg = '구글 시트 링크가 아닙니다. 시트를 연 화면의 주소나 공유 링크를 붙여 넣어 주세요.'; renderSheet(); } return; }
+  sheetBusy = true; renderSheet();
+  try {
+    const r = await fetch('https://docs.google.com/spreadsheets/d/' + id + '/export?format=xlsx', {cache: 'no-store'});
+    const buf = await r.arrayBuffer(), u8 = new Uint8Array(buf);
+    if (!r.ok || u8[0] !== 0x50 || u8[1] !== 0x4b) throw new Error('unreadable');
+    const parsed = parseWorkbook(buf, '구글 시트');
+    if (!parsed.sheets.some(s => s.words.length)) throw new Error('empty');
+    const when = new Date().toLocaleString('ko-KR', {month: 'numeric', day: 'numeric', hour: '2-digit', minute: '2-digit'});
+    sheetCfg.url = url; sheetCfg.id = id; sheetCfg.at = Date.now();
+    if (bookSig(parsed) === bookSig(book)) sheetCfg.msg = `${when} 확인 · 바뀐 내용이 없습니다.`;
+    else {
+      const k = x => (x.w + '|' + x.p).toLowerCase(), before = new Set(allWords().map(k)), had = before.size;
+      assignChapters(parsed, book); book = parsed; saveBook(); resetReview();
+      const now = allWords(), added = now.filter(x => !before.has(k(x))).length, seen = new Set(), dups = [];
+      now.forEach(x => { if (seen.has(k(x))) dups.push(x.w); else seen.add(k(x)); });
+      sheetCfg.msg = `${when} 업데이트 · 단어 ${now.length}개` + (had ? ` · 새 단어 ${added}개` : '')
+        + (dups.length ? ` · 같은 단어가 두 번 적힌 곳 ${dups.length}개: ${dups.slice(0, 8).join(', ')}${dups.length > 8 ? ' 등' : ''}` : '');
+      if (prefs.scope !== 'all' && !chapterMap().has(prefs.scope)) { prefs.scope = nextChapter(); savePrefs(); }
+    }
+  } catch (e) {
+    sheetCfg.msg = e.message === 'empty' ? '시트에서 단어와 뜻이 함께 있는 행을 찾지 못했습니다. 첫 줄에 단어 / 품사 / 뜻 제목이 있는지 확인해 주세요.'
+      : '시트를 읽지 못했습니다. 인터넷 연결과, 시트 공유가 "링크가 있는 모든 사용자"로 되어 있는지 확인해 주세요.';
+  }
+  sheetBusy = false; LS.set('tv.sheet', sheetCfg);
+  if (view === 'home') renderHome(); else if (view === 'list') renderList(); else renderSheet();
+}
+$('sheetBtn').addEventListener('click', () => updateFromSheet(true));
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden && sheetCfg.id && view !== 'quiz' && Date.now() - sheetCfg.at > 5 * 60 * 1000) updateFromSheet(false);
+});
+
 /* ---------- light / dark screen ---------- */
 const rootEl = document.documentElement, hostTheme = rootEl.getAttribute('data-theme');
 let theme = LS.get('tv.theme', '');
@@ -1107,6 +1168,7 @@ async function loadDefault(){
 }
 show('home');
 loadDefault().then(initSync);
+if (sheetCfg.id) updateFromSheet(false);
 </script>
 
 </body>
